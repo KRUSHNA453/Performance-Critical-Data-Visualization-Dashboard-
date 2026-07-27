@@ -1,10 +1,26 @@
+/*
+ * Chart chrome tokens mirror lib/theme.ts. Canvas cannot read CSS custom
+ * properties, so series colours live in JS and are duplicated here only for
+ * DOM chrome (legend swatches, table accents). lib/theme.ts is the source of
+ * truth; keep the two in step.
+ *
+ * Dark is the default so the first paint on a dark OS never flashes white.
+ */
 :root {
-  --bg: #0b0d12;
-  --bg-elevated: #12151d;
-  --border: #232734;
-  --text: #e6e8ee;
-  --text-muted: #8b91a3;
-  --accent: #5b8def;
+  color-scheme: dark;
+  --surface: #1a1a19;
+  --page: #0d0d0d;
+  --text: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.1);
+
+  --series-cpu: #3987e5;
+  --series-memory: #d95926;
+  --series-disk: #199e70;
+  --series-network: #c98500;
 
   --radius: 8px;
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
@@ -15,12 +31,20 @@
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #fbfbfd;
-    --bg-elevated: #ffffff;
-    --border: #e2e5ec;
-    --text: #14171f;
-    --text-muted: #626878;
-    --accent: #2f6be0;
+    color-scheme: light;
+    --surface: #fcfcfb;
+    --page: #f9f9f7;
+    --text: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #898781;
+    --grid: #e1e0d9;
+    --axis: #c3c2b7;
+    --border: rgba(11, 11, 11, 0.1);
+
+    --series-cpu: #2a78d6;
+    --series-memory: #eb6834;
+    --series-disk: #1baf7a;
+    --series-network: #eda100;
   }
 }
 
@@ -34,11 +58,11 @@ html,
 body {
   margin: 0;
   padding: 0;
-  height: 100%;
+  min-height: 100%;
 }
 
 body {
-  background: var(--bg);
+  background: var(--page);
   color: var(--text);
   font-family: var(--font-sans);
   font-size: 14px;
@@ -47,5 +71,18 @@ body {
 }
 
 a {
-  color: var(--accent);
+  color: var(--series-cpu);
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+/* Tabular figures keep metric readouts from jittering as digits change. */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
