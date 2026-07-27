@@ -1,11 +1,24 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useState } from "react";
+import { BarChart } from "@/components/charts/BarChart";
 import { LineChart } from "@/components/charts/LineChart";
+import { ScatterPlot } from "@/components/charts/ScatterPlot";
 import { MetricsPanel } from "@/components/ui/MetricsPanel";
 import { useDataStream } from "@/hooks/useDataStream";
-import { CATEGORIES, type Category, type PerformanceMetrics } from "@/lib/types";
+import {
+  CATEGORIES,
+  type Category,
+  type ChartType,
+  type PerformanceMetrics,
+} from "@/lib/types";
 import { CATEGORY_LABELS } from "@/lib/theme";
+
+const CHART_TYPES: Array<{ id: ChartType; label: string }> = [
+  { id: "line", label: "Line" },
+  { id: "bar", label: "Bar" },
+  { id: "scatter", label: "Scatter" },
+];
 
 export default function DashboardPage() {
   const { buffer, isStreaming, toggle, reset, getStats } = useDataStream({
@@ -16,6 +29,7 @@ export default function DashboardPage() {
     () => new Set(CATEGORIES),
   );
   const [stress, setStress] = useState(false);
+  const [chartType, setChartType] = useState<ChartType>("line");
   const [metrics, setMetrics] = useState<PerformanceMetrics | null>(null);
 
   // Metrics arrive twice a second; committing them straight to state is fine
@@ -34,9 +48,16 @@ export default function DashboardPage() {
   }, []);
 
   // Read once per render rather than per frame — these change slowly.
-  const statsRef = useRef(getStats);
-  statsRef.current = getStats;
   const stats = getStats();
+
+  const chartProps = {
+    buffer,
+    visibleCategories: visible,
+    following: isStreaming,
+    forceRedraw: stress,
+    onMetrics: handleMetrics,
+    height: 360,
+  };
 
   return (
     <main
@@ -50,23 +71,46 @@ export default function DashboardPage() {
     >
       <header>
         <h1 style={{ fontSize: 20, margin: "0 0 4px" }}>
-          Line chart — {stats.size.toLocaleString("en-US")} points, live
+          {stats.size.toLocaleString("en-US")} points, live
         </h1>
         <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 13 }}>
           Canvas 2D, no chart libraries. Data ticks at 100ms; rendering runs on
-          its own requestAnimationFrame loop at display rate.
+          its own requestAnimationFrame loop at display rate. All three charts
+          share one render engine.
         </p>
       </header>
 
+      <div
+        role="tablist"
+        aria-label="Chart type"
+        style={{ display: "flex", gap: 8 }}
+      >
+        {CHART_TYPES.map((type) => {
+          const selected = chartType === type.id;
+          return (
+            <button
+              key={type.id}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              onClick={() => setChartType(type.id)}
+              style={{
+                ...buttonStyle,
+                borderColor: selected ? "var(--series-cpu)" : "var(--border)",
+                color: selected ? "var(--series-cpu)" : "var(--text)",
+                fontWeight: selected ? 600 : 400,
+              }}
+            >
+              {type.label}
+            </button>
+          );
+        })}
+      </div>
+
       <section className="panel">
-        <LineChart
-          buffer={buffer}
-          visibleCategories={visible}
-          following={isStreaming}
-          forceRedraw={stress}
-          onMetrics={handleMetrics}
-          height={360}
-        />
+        {chartType === "line" && <LineChart {...chartProps} />}
+        {chartType === "bar" && <BarChart {...chartProps} />}
+        {chartType === "scatter" && <ScatterPlot {...chartProps} />}
       </section>
 
       <section className="panel">

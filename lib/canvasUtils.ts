@@ -343,6 +343,270 @@ export function drawPolyline(
 }
 
 /* ------------------------------------------------------------------ *
+ * Time-bucket aggregation (shared by BarChart, and the basis for the
+ * 1min/5min/1hour aggregation windows)
+ * ------------------------------------------------------------------ */
+
+/**
+ * Per-series, per-bucket accumulators in flat typed arrays.
+ * Indexed `series * bucketCount + bucket` so a whole series is contiguous.
+ */
+export interface BucketSet {
+  seriesCount: number;
+  bucketCount: number;
+  sums: Float64Array;
+  counts: Uint32Array;
+  mins: Float64Array;
+  maxs: Float64Array;
+}
+
+export function createBucketSet(
+  seriesCount: number,
+  bucketCount: number,
+): BucketSet {
+  const size = seriesCount * bucketCount;
+  return {
+    seriesCount,
+    bucketCount,
+    sums: new Float64Array(size),
+    counts: new Uint32Array(size),
+    mins: new Float64Array(size),
+    maxs: new Float64Array(size),
+  };
+}
+
+/** Reallocate only when the shape grew; otherwise reuse in place. */
+export function ensureBucketSet(
+  set: BucketSet,
+  seriesCount: number,
+  bucketCount: number,
+): BucketSet {
+  if (set.seriesCount >= seriesCount && set.bucketCount >= bucketCount) {
+    return set;
+  }
+  return createBucketSet(
+    Math.max(set.seriesCount, seriesCount),
+    Math.max(set.bucketCount, bucketCount),
+  );
+}
+
+/**
+ * Fold a time range into fixed-width buckets, one pass over the buffer.
+ *
+ * `visible` is a per-series mask; hidden series are skipped before any
+ * arithmetic. Returns the number of samples folded.
+ *
+ * Buckets are half-open `[lo, lo + bucketMs)`. `bucketCount` must therefore be
+ * `floor((rangeEnd - rangeStartMs) / bucketMs) + 1` to give the sample sitting
+ * exactly on the range end somewhere to land — sizing it with `ceil` drops
+ * that sample whenever the span divides evenly.
+ */
+export function aggregateBuckets(
+  buffer: SeriesRingBuffer,
+  set: BucketSet,
+  startIndex: number,
+  endIndex: number,
+  rangeStartMs: number,
+  bucketMs: number,
+  bucketCount: number,
+  visible: Uint8Array,
+): number {
+  const stride = set.bucketCount;
+  // Only clear the region actually in use — the pool may be much larger.
+  for (let s = 0; s < set.seriesCount; s++) {
+    const base = s * stride;
+    set.sums.fill(0, base, base + bucketCount);
+    set.counts.fill(0, base, base + bucketCount);
+  }
+
+  if (bucketMs <= 0) return 0;
+
+  let examined = 0;
+  for (let i = startIndex; i < endIndex; i++) {
+    const s = buffer.categoryIdAt(i);
+    if (s >= set.seriesCount || visible[s] === 0) continue;
+
+    const bucket = ((buffer.timestampAt(i) - rangeStartMs) / bucketMs) | 0;
+    if (bucket < 0 || bucket >= bucketCount) continue;
+
+    const value = buffer.valueAt(i);
+    const idx = s * stride + bucket;
+    if (set.counts[idx] === 0) {
+      set.mins[idx] = value;
+      set.maxs[idx] = value;
+    } else {
+      if (value < set.mins[idx]!) set.mins[idx] = value;
+      else if (value > set.maxs[idx]!) set.maxs[idx] = value;
+    }
+    set.sums[idx]! += value;
+    set.counts[idx]!++;
+    examined++;
+  }
+  return examined;
+}
+
+/** Mean of a bucket, or NaN when the bucket is empty. */
+export function bucketMean(set: BucketSet, series: number, bucket: number): number {
+  const idx = series * set.bucketCount + bucket;
+  const n = set.counts[idx]!;
+  return n === 0 ? NaN : set.sums[idx]! / n;
+}
+
+/* ------------------------------------------------------------------ *
+ * Bars
+ * ------------------------------------------------------------------ */
+
+/**
+ * Add a bar to the current path with its data-end rounded and its baseline
+ * end square, so the bar reads as anchored to the axis rather than floating.
+ *
+ * Adds to the path rather than filling, so a whole series batches into one
+ * `fill()` call instead of one per bar.
+ */
+export function addBarToPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius = 4,
+): void {
+  if (height <= 0 || width <= 0) return;
+  const r = Math.min(radius, width / 2, height);
+  ctx.moveTo(x, y + height);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.lineTo(x + width - r, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+  ctx.lineTo(x + width, y + height);
+  ctx.closePath();
+}
+
+/* ------------------------------------------------------------------ *
+ * Scatter: pixel de-duplication
+ * ------------------------------------------------------------------ */
+
+/**
+ * Occupancy grid that avoids overdrawing marks onto pixels already covered.
+ *
+ * Uses a monotonically increasing stamp instead of clearing: a cell counts as
+ * occupied when its stamp equals the current one, so starting a new pass is a
+ * single increment rather than a memset of the whole grid. At 60fps across
+ * several series that difference is most of the cost of the technique.
+ */
+export interface StampGrid {
+  cols: number;
+  rows: number;
+  /** Cell size in CSS pixels. */
+  cell: number;
+  stamps: Uint32Array;
+  current: number;
+}
+
+export function createStampGrid(
+  cols: number,
+  rows: number,
+  cell: number,
+): StampGrid {
+  return {
+    cols,
+    rows,
+    cell,
+    stamps: new Uint32Array(Math.max(1, cols * rows)),
+    current: 0,
+  };
+}
+
+export function ensureStampGrid(
+  grid: StampGrid,
+  plotWidth: number,
+  plotHeight: number,
+  cell: number,
+): StampGrid {
+  const cols = Math.max(1, Math.ceil(plotWidth / cell) + 1);
+  const rows = Math.max(1, Math.ceil(plotHeight / cell) + 1);
+  if (grid.cell === cell && grid.cols >= cols && grid.rows >= rows) return grid;
+  return createStampGrid(Math.max(grid.cols, cols), Math.max(grid.rows, rows), cell);
+}
+
+/** Begin a new de-duplication pass. */
+export function beginStampPass(grid: StampGrid): void {
+  grid.current++;
+  // Wrapping would make stale cells look current; reset on overflow.
+  if (grid.current === 0xffffffff) {
+    grid.stamps.fill(0);
+    grid.current = 1;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Scatter marks
+ * ------------------------------------------------------------------ */
+
+/**
+ * Draw one series as square marks, skipping marks that would land on an
+ * already-covered cell.
+ *
+ * Every mark is added to a single path and filled once. Issuing `fillRect`
+ * per point costs a separate rasteriser call each time; batching 10,000 marks
+ * into one `fill()` is roughly an order of magnitude cheaper, and is what
+ * keeps a dense scatter inside the frame budget.
+ *
+ * @returns the number of marks actually drawn after de-duplication.
+ */
+export function drawPointsBatched(
+  ctx: CanvasRenderingContext2D,
+  buffer: SeriesRingBuffer,
+  seriesId: number,
+  startIndex: number,
+  endIndex: number,
+  xMap: LinearMap,
+  yMap: LinearMap,
+  rect: PlotRect,
+  color: string,
+  markSize: number,
+  grid: StampGrid,
+): number {
+  const xScale = xMap.scale;
+  const xOffset = xMap.offset;
+  const yScale = yMap.scale;
+  const yOffset = yMap.offset;
+  const half = markSize / 2;
+  const cell = grid.cell;
+  const cols = grid.cols;
+  const stamps = grid.stamps;
+  const stamp = grid.current;
+
+  const left = rect.x;
+  const top = rect.y;
+  const right = rect.x + rect.width;
+  const bottom = rect.y + rect.height;
+
+  let drawn = 0;
+  ctx.beginPath();
+  for (let i = startIndex; i < endIndex; i++) {
+    if (buffer.categoryIdAt(i) !== seriesId) continue;
+
+    const px = buffer.timestampAt(i) * xScale + xOffset;
+    if (px < left || px > right) continue;
+    const py = buffer.valueAt(i) * yScale + yOffset;
+    if (py < top || py > bottom) continue;
+
+    const col = ((px - left) / cell) | 0;
+    const row = ((py - top) / cell) | 0;
+    const cellIndex = row * cols + col;
+    if (stamps[cellIndex] === stamp) continue; // already covered
+    stamps[cellIndex] = stamp;
+
+    ctx.rect(px - half, py - half, markSize, markSize);
+    drawn++;
+  }
+  ctx.fillStyle = color;
+  ctx.fill();
+  return drawn;
+}
+
+/* ------------------------------------------------------------------ *
  * Axes and ticks
  * ------------------------------------------------------------------ */
 
@@ -384,6 +648,19 @@ const TIME_STEPS_MS = [
   43_200_000, 86_400_000,
 ];
 
+/**
+ * Smallest human-scale interval that divides `spanMs` into at most
+ * `targetCount` pieces. Shared by time axes and bar bucketing so tick
+ * boundaries and bucket boundaries line up.
+ */
+export function niceTimeStep(spanMs: number, targetCount: number): number {
+  const rough = spanMs / Math.max(1, targetCount);
+  for (const candidate of TIME_STEPS_MS) {
+    if (candidate >= rough) return candidate;
+  }
+  return TIME_STEPS_MS[TIME_STEPS_MS.length - 1]!;
+}
+
 /** Tick timestamps across `[startMs, endMs]`, snapped to a readable interval. */
 export function timeTicks(
   startMs: number,
@@ -392,14 +669,7 @@ export function timeTicks(
 ): number[] {
   const span = endMs - startMs;
   if (span <= 0) return [];
-  const rough = span / Math.max(1, targetCount);
-  let step = TIME_STEPS_MS[TIME_STEPS_MS.length - 1]!;
-  for (const candidate of TIME_STEPS_MS) {
-    if (candidate >= rough) {
-      step = candidate;
-      break;
-    }
-  }
+  const step = niceTimeStep(span, targetCount);
   const first = Math.ceil(startMs / step) * step;
   const ticks: number[] = [];
   for (let t = first, guard = 0; t <= endMs && guard < 1000; t += step, guard++) {

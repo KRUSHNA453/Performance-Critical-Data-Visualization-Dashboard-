@@ -1,0 +1,211 @@
+"use client";
+
+import { useCallback, useMemo, useRef } from "react";
+import { ChartCanvas, type ChartFrame, type DrawResult } from "./ChartCanvas";
+import { ChartLegend } from "./ChartLegend";
+import {
+  beginStampPass,
+  clearCanvas,
+  clipToPlot,
+  createStampGrid,
+  drawPointsBatched,
+  drawXAxis,
+  drawYAxis,
+  ensureStampGrid,
+  linearMap,
+  linearTicks,
+  niceStep,
+  timeTicks,
+} from "@/lib/canvasUtils";
+import { SCATTER_SERIES_LIMIT, buildSeries } from "@/lib/series";
+import type { SeriesRingBuffer } from "@/lib/ringBuffer";
+import {
+  CATEGORIES,
+  type Category,
+  type PerformanceMetrics,
+} from "@/lib/types";
+import { useChartTheme } from "@/hooks/useChartTheme";
+
+const ALL_CATEGORIES: ReadonlySet<Category> = new Set(CATEGORIES);
+
+/** Mark edge length in CSS pixels. */
+const MARK_SIZE = 3;
+
+/**
+ * De-duplication cell size. Slightly smaller than the mark so marks that would
+ * visually merge are dropped, but genuinely distinct positions survive.
+ */
+const DEDUP_CELL = 2;
+
+export interface ScatterPlotProps {
+  buffer: SeriesRingBuffer;
+  visibleCategories?: ReadonlySet<Category>;
+  following?: boolean;
+  yDomain?: readonly [number, number];
+  forceRedraw?: boolean;
+  onMetrics?: (metrics: PerformanceMetrics) => void;
+  height?: number;
+}
+
+/**
+ * Scatter plot of individual samples over time.
+ *
+ * Two things make a dense scatter affordable. Marks are de-duplicated against
+ * an occupancy grid, so samples landing on already-covered pixels cost nothing
+ * to draw; and every surviving mark is batched into one path per series and
+ * filled once, rather than issuing a rasteriser call per point.
+ *
+ * The series cap is a correctness constraint, not a performance one: scatter
+ * marks can sit beside any other mark, so the palette is judged on all colour
+ * pairs, and the fourth slot fails that bar against the second. See
+ * `SCATTER_SERIES_LIMIT`.
+ */
+export function ScatterPlot({
+  buffer,
+  visibleCategories = ALL_CATEGORIES,
+  following = true,
+  yDomain = [0, 100],
+  forceRedraw = false,
+  onMetrics,
+  height = 360,
+}: ScatterPlotProps) {
+  const theme = useChartTheme();
+
+  const requested = useMemo(
+    () => buildSeries(visibleCategories, theme),
+    [visibleCategories, theme],
+  );
+  const series = useMemo(
+    () => requested.slice(0, SCATTER_SERIES_LIMIT),
+    [requested],
+  );
+  const dropped = requested.length - series.length;
+
+  const seriesRef = useRef(series);
+  seriesRef.current = series;
+  const followingRef = useRef(following);
+  followingRef.current = following;
+  const domainRef = useRef(yDomain);
+  domainRef.current = yDomain;
+
+  const gridRef = useRef(createStampGrid(1, 1, DEDUP_CELL));
+
+  const window = useCallback((): {
+    start: number;
+    end: number;
+    span: number;
+  } | null => {
+    const end = buffer.endTime;
+    const start = buffer.startTime;
+    if (end === null || start === null) return null;
+    const span = Math.max(1000, end - start);
+    const right = followingRef.current ? Date.now() : end;
+    return { start: right - span, end: right, span };
+  }, [buffer]);
+
+  const signature = useCallback(
+    (frame: ChartFrame): string => {
+      const w = window();
+      if (w === null) return "empty";
+      const d = domainRef.current;
+      return `${buffer.revision}|${w.start}|${frame.width}|${frame.height}|${frame.theme.mode}|${seriesRef.current.length}|${d[0]}|${d[1]}`;
+    },
+    [buffer, window],
+  );
+
+  const draw = useCallback(
+    (frame: ChartFrame): DrawResult => {
+      const { ctx, rect, theme: t, axisTheme } = frame;
+      const w = window();
+      clearCanvas(ctx, frame.width, frame.height, t.surface);
+      if (w === null) return { rendered: 0, examined: 0 };
+
+      const domain = domainRef.current;
+      const xMap = linearMap(w.start, w.end, rect.x, rect.x + rect.width);
+      const yMap = linearMap(
+        domain[0],
+        domain[1],
+        rect.y + rect.height,
+        rect.y,
+      );
+
+      const yStep = niceStep(domain[1] - domain[0], 5);
+      drawYAxis(
+        ctx,
+        rect,
+        linearTicks(domain[0], domain[1], 5),
+        yMap,
+        yStep,
+        axisTheme,
+      );
+      drawXAxis(
+        ctx,
+        rect,
+        timeTicks(w.start, w.end, Math.max(2, Math.floor(rect.width / 90))),
+        xMap,
+        w.span,
+        axisTheme,
+      );
+
+      gridRef.current = ensureStampGrid(
+        gridRef.current,
+        rect.width,
+        rect.height,
+        DEDUP_CELL,
+      );
+      const grid = gridRef.current;
+
+      const startIndex = buffer.lowerBound(w.start);
+      const examined = buffer.length - startIndex;
+
+      clipToPlot(ctx, rect);
+      let marks = 0;
+      for (const descriptor of seriesRef.current) {
+        // A fresh pass per series: two series may legitimately occupy the
+        // same pixel, and dropping the second would hide a real overlap.
+        beginStampPass(grid);
+        marks += drawPointsBatched(
+          ctx,
+          buffer,
+          descriptor.id,
+          startIndex,
+          buffer.length,
+          xMap,
+          yMap,
+          rect,
+          descriptor.color,
+          MARK_SIZE,
+          grid,
+        );
+      }
+      ctx.restore();
+
+      return { rendered: marks, examined };
+    },
+    [buffer, window],
+  );
+
+  return (
+    <ChartCanvas
+      height={height}
+      ariaLabel={`Scatter plot of ${series
+        .map((s) => s.label)
+        .join(", ")} samples over time`}
+      signature={signature}
+      draw={draw}
+      forceRedraw={forceRedraw}
+      active={following}
+      onMetrics={onMetrics}
+    >
+      <ChartLegend
+        series={series}
+        mark="block"
+        note={
+          dropped > 0
+            ? `showing first ${SCATTER_SERIES_LIMIT} series — scatter marks need all-pairs colour separation, which the 4th slot fails`
+            : undefined
+        }
+      />
+    </ChartCanvas>
+  );
+}
