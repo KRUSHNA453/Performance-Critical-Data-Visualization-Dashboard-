@@ -4,6 +4,7 @@ import { useCallback, useState } from "react";
 import { BarChart } from "@/components/charts/BarChart";
 import { LineChart } from "@/components/charts/LineChart";
 import { ScatterPlot } from "@/components/charts/ScatterPlot";
+import { DataTable } from "@/components/ui/DataTable";
 import { MetricsPanel } from "@/components/ui/MetricsPanel";
 import { useDataStream } from "@/hooks/useDataStream";
 import {
@@ -172,6 +173,11 @@ export default function DashboardPage() {
             </label>
           ))}
         </div>
+      </section>
+
+      <section className="panel">
+        <h2 style={{ fontSize: 14, margin: "0 0 10px" }}>Raw data points</h2>
+        <DataTable buffer={buffer} visibleCategories={visible} height={340} />
       </section>
 
       <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>
