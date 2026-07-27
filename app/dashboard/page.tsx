@@ -1,9 +1,11 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { BarChart } from "@/components/charts/BarChart";
 import { LineChart } from "@/components/charts/LineChart";
 import { ScatterPlot } from "@/components/charts/ScatterPlot";
+import { FilterPanel } from "@/components/controls/FilterPanel";
+import { TimeRangeSelector } from "@/components/controls/TimeRangeSelector";
 import { DataTable } from "@/components/ui/DataTable";
 import { MetricsPanel } from "@/components/ui/MetricsPanel";
 import { useDataStream } from "@/hooks/useDataStream";
@@ -13,7 +15,11 @@ import {
   type ChartType,
   type PerformanceMetrics,
 } from "@/lib/types";
-import { CATEGORY_LABELS } from "@/lib/theme";
+import {
+  LIVE_VIEWPORT,
+  resolveWindow,
+  type ViewportState,
+} from "@/lib/viewport";
 
 const CHART_TYPES: Array<{ id: ChartType; label: string }> = [
   { id: "line", label: "Line" },
@@ -33,28 +39,46 @@ export default function DashboardPage() {
   const [chartType, setChartType] = useState<ChartType>("line");
   const [metrics, setMetrics] = useState<PerformanceMetrics | null>(null);
 
-  // Metrics arrive twice a second; committing them straight to state is fine
-  // at that rate and keeps the readout honest.
+  /**
+   * The viewport lives in a ref because the render loop reads it every frame
+   * and gestures mutate it directly. `viewportUi` is a throttled mirror, used
+   * only by the DOM controls that display the range.
+   */
+  const viewportRef = useRef<ViewportState>(LIVE_VIEWPORT);
+  const [viewportUi, setViewportUi] = useState<ViewportState>(LIVE_VIEWPORT);
+
+  const handleViewportChange = useCallback((next: ViewportState) => {
+    setViewportUi(next);
+  }, []);
+
+  /** Used by the controls, which must write the ref as well as the mirror. */
+  const applyViewport = useCallback((next: ViewportState) => {
+    viewportRef.current = next;
+    setViewportUi(next);
+  }, []);
+
   const handleMetrics = useCallback((next: PerformanceMetrics) => {
     setMetrics(next);
   }, []);
 
-  const toggleCategory = useCallback((category: Category) => {
-    setVisible((prev) => {
-      const next = new Set(prev);
-      if (next.has(category)) next.delete(category);
-      else next.add(category);
-      return next;
-    });
-  }, []);
-
-  // Read once per render rather than per frame — these change slowly.
   const stats = getStats();
+
+  // Resolved here for the readout only; the charts resolve their own window
+  // per frame, since a live window's right edge is the clock.
+  const timeWindow = resolveWindow(
+    buffer.startTime,
+    buffer.endTime,
+    viewportUi,
+    Date.now(),
+  );
+  const live = timeWindow?.live ?? true;
 
   const chartProps = {
     buffer,
     visibleCategories: visible,
-    following: isStreaming,
+    viewportRef,
+    onViewportChange: handleViewportChange,
+    live,
     forceRedraw: stress,
     onMetrics: handleMetrics,
     height: 360,
@@ -75,11 +99,25 @@ export default function DashboardPage() {
           {stats.size.toLocaleString("en-US")} points, live
         </h1>
         <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 13 }}>
-          Canvas 2D, no chart libraries. Data ticks at 100ms; rendering runs on
-          its own requestAnimationFrame loop at display rate. All three charts
-          share one render engine.
+          Canvas 2D, no chart libraries. Drag to pan, scroll or pinch to zoom,
+          double-click to return to live.
         </p>
       </header>
+
+      <section className="panel" style={{ display: "grid", gap: 12 }}>
+        <TimeRangeSelector
+          viewport={viewportUi}
+          window={timeWindow}
+          onChange={applyViewport}
+        />
+        <FilterPanel
+          visible={visible}
+          onChange={setVisible}
+          isStreaming={isStreaming}
+          onToggleStream={toggle}
+          onReset={reset}
+        />
+      </section>
 
       <div
         role="tablist"
@@ -106,6 +144,18 @@ export default function DashboardPage() {
             </button>
           );
         })}
+        <button
+          type="button"
+          onClick={() => setStress((s) => !s)}
+          style={{
+            ...buttonStyle,
+            marginLeft: "auto",
+            borderColor: stress ? "#fab219" : "var(--border)",
+            color: stress ? "#fab219" : "var(--text)",
+          }}
+        >
+          {stress ? "Stress mode: ON" : "Stress mode: off"}
+        </button>
       </div>
 
       <section className="panel">
@@ -120,59 +170,6 @@ export default function DashboardPage() {
           bufferSize={stats.size}
           bufferBytes={stats.bufferBytes}
         />
-      </section>
-
-      <section
-        className="panel"
-        style={{ display: "flex", flexWrap: "wrap", gap: 12 }}
-      >
-        <button type="button" onClick={toggle} style={buttonStyle}>
-          {isStreaming ? "Pause stream" : "Resume stream"}
-        </button>
-        <button type="button" onClick={reset} style={buttonStyle}>
-          Reset data
-        </button>
-        <button
-          type="button"
-          onClick={() => setStress((s) => !s)}
-          style={{
-            ...buttonStyle,
-            borderColor: stress ? "#fab219" : "var(--border)",
-            color: stress ? "#fab219" : "var(--text)",
-          }}
-        >
-          {stress ? "Stress mode: ON" : "Stress mode: off"}
-        </button>
-
-        <div
-          style={{
-            display: "flex",
-            gap: 12,
-            flexWrap: "wrap",
-            alignItems: "center",
-            marginLeft: "auto",
-          }}
-        >
-          {CATEGORIES.map((category) => (
-            <label
-              key={category}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                fontSize: 13,
-                cursor: "pointer",
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={visible.has(category)}
-                onChange={() => toggleCategory(category)}
-              />
-              {CATEGORY_LABELS[category]}
-            </label>
-          ))}
-        </div>
       </section>
 
       <section className="panel">

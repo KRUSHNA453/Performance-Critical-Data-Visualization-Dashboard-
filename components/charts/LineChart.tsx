@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef, type MutableRefObject } from "react";
 import { ChartCanvas, type ChartFrame, type DrawResult } from "./ChartCanvas";
 import { ChartLegend } from "./ChartLegend";
 import { AXIS_FONT } from "@/lib/theme";
@@ -28,14 +28,24 @@ import {
   type PerformanceMetrics,
 } from "@/lib/types";
 import { useChartTheme } from "@/hooks/useChartTheme";
+import { useChartInteraction } from "@/hooks/useChartInteraction";
+import { useTimeWindow } from "@/hooks/useTimeWindow";
+import type { ViewportState } from "@/lib/viewport";
 
 const ALL_CATEGORIES: ReadonlySet<Category> = new Set(CATEGORIES);
 
 export interface LineChartProps {
   buffer: SeriesRingBuffer;
   visibleCategories?: ReadonlySet<Category>;
-  /** Pin the right edge to wall-clock time so the plot scrolls smoothly. */
-  following?: boolean;
+  /**
+   * Shared visible window. Mutated in place by gestures and read by the render
+   * loop every frame, so panning never round-trips through React state.
+   */
+  viewportRef: MutableRefObject<ViewportState>;
+  /** Throttled notification for UI that displays the range. */
+  onViewportChange?: (viewport: ViewportState) => void;
+  /** Whether the window is currently tracking the live edge. */
+  live?: boolean;
   yDomain?: readonly [number, number];
   forceRedraw?: boolean;
   onMetrics?: (metrics: PerformanceMetrics) => void;
@@ -54,7 +64,9 @@ export interface LineChartProps {
 export function LineChart({
   buffer,
   visibleCategories = ALL_CATEGORIES,
-  following = true,
+  viewportRef,
+  onViewportChange,
+  live = true,
   yDomain = [0, 100],
   forceRedraw = false,
   onMetrics,
@@ -70,30 +82,31 @@ export function LineChart({
   const poolRef = useRef<VertexBuffer[]>([]);
   const seriesRef = useRef(series);
   seriesRef.current = series;
-  const followingRef = useRef(following);
-  followingRef.current = following;
   const domainRef = useRef(yDomain);
   domainRef.current = yDomain;
 
-  /** Visible window, recomputed per frame; following advances it continuously. */
-  const window = useCallback(
-    (): { start: number; end: number; span: number } | null => {
-      const end = buffer.endTime;
-      const start = buffer.startTime;
-      if (end === null || start === null) return null;
-      const span = Math.max(1000, end - start);
-      const right = followingRef.current ? Date.now() : end;
-      return { start: right - span, end: right, span };
-    },
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const getExtent = useCallback(
+    () => ({ start: buffer.startTime, end: buffer.endTime }),
     [buffer],
   );
+  const { latencyRef } = useChartInteraction({
+    targetRef: canvasRef,
+    viewportRef,
+    getExtent,
+    onChange: onViewportChange,
+  });
+
+  const window = useTimeWindow(buffer, viewportRef);
 
   const signature = useCallback(
     (frame: ChartFrame): string => {
       const w = window();
       if (w === null) return "empty";
       const d = domainRef.current;
-      return `${buffer.revision}|${w.start}|${frame.width}|${frame.height}|${frame.theme.mode}|${seriesRef.current.length}|${d[0]}|${d[1]}`;
+      // Span belongs in the key as well as start: a zoom that keeps the right
+      // edge fixed changes only the span, and would otherwise not redraw.
+      return `${buffer.revision}|${w.start}|${w.span}|${frame.width}|${frame.height}|${frame.theme.mode}|${seriesRef.current.length}|${d[0]}|${d[1]}`;
     },
     [buffer, window],
   );
@@ -183,8 +196,10 @@ export function LineChart({
       signature={signature}
       draw={draw}
       forceRedraw={forceRedraw}
-      active={following}
+      active={live}
       onMetrics={onMetrics}
+      canvasRefOut={canvasRef}
+      interactionLatencyRef={latencyRef}
     >
       <ChartLegend series={series} mark="line" />
     </ChartCanvas>

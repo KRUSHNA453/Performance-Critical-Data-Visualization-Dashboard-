@@ -54,6 +54,20 @@ export function MetricsPanel({
       value:
         metrics === null ? "—" : metrics.pointsRendered.toLocaleString("en-US"),
     },
+    {
+      // Input-to-pixels, measured on the frame that consumed the gesture.
+      label: "Interaction",
+      value:
+        metrics === null || metrics.lastInteractionMs === null
+          ? "—"
+          : `${metrics.lastInteractionMs.toFixed(1)} ms`,
+      color:
+        metrics === null || metrics.lastInteractionMs === null
+          ? undefined
+          : metrics.lastInteractionMs < 100
+            ? "#0ca30c"
+            : "#d03b3b",
+    },
     { label: "Buffer", value: bufferSize.toLocaleString("en-US") },
     { label: "Buffer bytes", value: `${(bufferBytes / 1024).toFixed(0)} KiB` },
     {

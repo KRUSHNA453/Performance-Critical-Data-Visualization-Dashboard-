@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useRef, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  type MutableRefObject,
+  type ReactNode,
+} from "react";
 import {
   DEFAULT_MARGINS,
   computePlotRect,
@@ -62,6 +68,18 @@ export interface ChartCanvasProps {
   /** Whether the chart is expected to be animating; gates dropped-frame counting. */
   active?: boolean;
   onMetrics?: (metrics: PerformanceMetrics) => void;
+  /**
+   * Receives the canvas element so a caller can bind gesture listeners to it.
+   * Populated on mount; child effects run before the parent's, so a parent
+   * effect can rely on it being set.
+   */
+  canvasRefOut?: MutableRefObject<HTMLCanvasElement | null>;
+  /**
+   * Holds `performance.now()` of the oldest input not yet on screen, or 0.
+   * The loop converts it into `lastInteractionMs` on the frame that draws,
+   * measuring real input-to-pixels latency rather than estimating it.
+   */
+  interactionLatencyRef?: MutableRefObject<number>;
   /** Rendered above the canvas — legends, notes. */
   children?: ReactNode;
 }
@@ -78,6 +96,7 @@ interface LoopState {
   forceRedraw: boolean;
   active: boolean;
   onMetrics: ((metrics: PerformanceMetrics) => void) | undefined;
+  interactionLatencyRef: MutableRefObject<number> | undefined;
 }
 
 /**
@@ -101,11 +120,22 @@ export function ChartCanvas({
   forceRedraw = false,
   active = true,
   onMetrics,
+  canvasRefOut,
+  interactionLatencyRef,
   children,
 }: ChartCanvasProps) {
   const [containerRef, size] = useElementSize<HTMLDivElement>();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mode = useThemeMode();
+
+  // Hand the element up so a parent can attach gesture listeners to it.
+  useEffect(() => {
+    if (canvasRefOut === undefined) return;
+    canvasRefOut.current = canvasRef.current;
+    return () => {
+      canvasRefOut.current = null;
+    };
+  }, [canvasRefOut]);
 
   const theme = useMemo(() => getChartTheme(mode), [mode]);
   const axisTheme = useMemo<AxisTheme>(
@@ -129,6 +159,7 @@ export function ChartCanvas({
     forceRedraw,
     active,
     onMetrics,
+    interactionLatencyRef,
   });
   stateRef.current = {
     width: size.width,
@@ -141,6 +172,7 @@ export function ChartCanvas({
     forceRedraw,
     active,
     onMetrics,
+    interactionLatencyRef,
   };
 
   useEffect(() => {
@@ -165,6 +197,7 @@ export function ChartCanvas({
     let lastEmitAt = 0;
     let lastRendered = 0;
     let lastExamined = 0;
+    let lastInteractionMs: number | null = null;
 
     const maybeEmitMetrics = (now: number) => {
       const s = stateRef.current;
@@ -198,7 +231,7 @@ export function ChartCanvas({
           memory === undefined
             ? null
             : Math.round((memory.usedJSHeapSize / 1048576) * 10) / 10,
-        lastInteractionMs: null,
+        lastInteractionMs,
       });
 
       frames = 0;
@@ -259,6 +292,17 @@ export function ChartCanvas({
       const drawStart = performance.now();
       const result = s.draw(chartFrame);
       const drawMs = performance.now() - drawStart;
+
+      // Measured here, after the draw that consumed the input, so the number
+      // covers dispatch + gesture math + projection + rasterisation rather
+      // than just the handler.
+      const pendingInput = s.interactionLatencyRef?.current ?? 0;
+      if (pendingInput !== 0) {
+        lastInteractionMs = performance.now() - pendingInput;
+        if (s.interactionLatencyRef !== undefined) {
+          s.interactionLatencyRef.current = 0;
+        }
+      }
 
       drawnFrames++;
       drawTimeSum += drawMs;
