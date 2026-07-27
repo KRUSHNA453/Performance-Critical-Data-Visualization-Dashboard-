@@ -4,6 +4,7 @@ import { useCallback, useRef, useState } from "react";
 import { BarChart } from "@/components/charts/BarChart";
 import { LineChart } from "@/components/charts/LineChart";
 import { ScatterPlot } from "@/components/charts/ScatterPlot";
+import { AggregationControl } from "@/components/controls/AggregationControl";
 import { FilterPanel } from "@/components/controls/FilterPanel";
 import { TimeRangeSelector } from "@/components/controls/TimeRangeSelector";
 import { DataTable } from "@/components/ui/DataTable";
@@ -11,6 +12,7 @@ import { MetricsPanel } from "@/components/ui/MetricsPanel";
 import { useDataStream } from "@/hooks/useDataStream";
 import {
   CATEGORIES,
+  type AggregationWindow,
   type Category,
   type ChartType,
   type PerformanceMetrics,
@@ -37,6 +39,7 @@ export default function DashboardPage() {
   );
   const [stress, setStress] = useState(false);
   const [chartType, setChartType] = useState<ChartType>("line");
+  const [aggregation, setAggregation] = useState<AggregationWindow>("raw");
   const [metrics, setMetrics] = useState<PerformanceMetrics | null>(null);
 
   /**
@@ -79,6 +82,7 @@ export default function DashboardPage() {
     viewportRef,
     onViewportChange: handleViewportChange,
     live,
+    aggregation,
     forceRedraw: stress,
     onMetrics: handleMetrics,
     height: 360,
@@ -109,6 +113,11 @@ export default function DashboardPage() {
           viewport={viewportUi}
           window={timeWindow}
           onChange={applyViewport}
+        />
+        <AggregationControl
+          value={aggregation}
+          onChange={setAggregation}
+          spanMs={timeWindow?.span ?? 0}
         />
         <FilterPanel
           visible={visible}

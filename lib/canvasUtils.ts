@@ -452,6 +452,52 @@ export function bucketMean(set: BucketSet, series: number, bucket: number): numb
   return n === 0 ? NaN : set.sums[idx]! / n;
 }
 
+/**
+ * Project bucket means into per-series pixel vertices, one vertex per
+ * non-empty bucket, positioned at the bucket's midpoint.
+ *
+ * The aggregated counterpart to `projectSeries`. Empty buckets are skipped
+ * rather than drawn as zero — a gap in the data is not a reading of zero, and
+ * plotting it as one would invent a value the instrument never reported.
+ *
+ * @returns total vertices written across all series.
+ */
+export function projectBuckets(
+  set: BucketSet,
+  seriesCount: number,
+  bucketCount: number,
+  rangeStartMs: number,
+  bucketMs: number,
+  xMap: LinearMap,
+  yMap: LinearMap,
+  out: Array<VertexBuffer | undefined>,
+): number {
+  const halfBucket = bucketMs / 2;
+  let total = 0;
+
+  for (let s = 0; s < seriesCount; s++) {
+    const vb = out[s];
+    if (vb === undefined) continue;
+    vb.count = 0;
+
+    const capacity = vb.xs.length;
+    const base = s * set.bucketCount;
+    for (let b = 0; b < bucketCount && vb.count < capacity; b++) {
+      const idx = base + b;
+      const n = set.counts[idx]!;
+      if (n === 0) continue; // gap, not zero
+
+      const mean = set.sums[idx]! / n;
+      const t = rangeStartMs + b * bucketMs + halfBucket;
+      vb.xs[vb.count] = t * xMap.scale + xMap.offset;
+      vb.ys[vb.count] = mean * yMap.scale + yMap.offset;
+      vb.count++;
+    }
+    total += vb.count;
+  }
+  return total;
+}
+
 /* ------------------------------------------------------------------ *
  * Bars
  * ------------------------------------------------------------------ */

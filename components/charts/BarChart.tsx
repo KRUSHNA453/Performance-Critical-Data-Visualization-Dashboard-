@@ -21,8 +21,10 @@ import {
 } from "@/lib/canvasUtils";
 import { buildSeries, seriesMask } from "@/lib/series";
 import type { SeriesRingBuffer } from "@/lib/ringBuffer";
+import { bucketCountFor, bucketMsFor, snapToBucket } from "@/lib/aggregation";
 import {
   CATEGORIES,
+  type AggregationWindow,
   type Category,
   type PerformanceMetrics,
 } from "@/lib/types";
@@ -39,12 +41,38 @@ const TARGET_GROUP_PX = 46;
 /** Surface gap between adjacent bars, per the mark spec. */
 const BAR_GAP_PX = 2;
 
+/**
+ * Bucket width for the chart.
+ *
+ * An explicit aggregation window wins. "raw" has no meaning for bars — one bar
+ * per 100ms sample would be far narrower than a pixel — so it falls back to
+ * the widest nice interval that still fits a readable number of bar groups
+ * across the plot.
+ */
+function resolveBucketMs(
+  aggregation: AggregationWindow,
+  spanMs: number,
+  plotWidth: number,
+): number {
+  const explicit = bucketMsFor(aggregation);
+  if (explicit > 0) return explicit;
+  return niceTimeStep(
+    spanMs,
+    Math.max(2, Math.floor(plotWidth / TARGET_GROUP_PX)),
+  );
+}
+
 export interface BarChartProps {
   buffer: SeriesRingBuffer;
   visibleCategories?: ReadonlySet<Category>;
   viewportRef: MutableRefObject<ViewportState>;
   onViewportChange?: (viewport: ViewportState) => void;
   live?: boolean;
+  /**
+   * Bucket size. "raw" lets the chart pick a bucket width that fits the plot,
+   * since a bar per 100ms sample would be sub-pixel.
+   */
+  aggregation?: AggregationWindow;
   yDomain?: readonly [number, number];
   forceRedraw?: boolean;
   onMetrics?: (metrics: PerformanceMetrics) => void;
@@ -69,6 +97,7 @@ export function BarChart({
   viewportRef,
   onViewportChange,
   live = true,
+  aggregation = "raw",
   yDomain = [0, 100],
   forceRedraw = false,
   onMetrics,
@@ -84,6 +113,8 @@ export function BarChart({
   seriesRef.current = series;
   const domainRef = useRef(yDomain);
   domainRef.current = yDomain;
+  const aggregationRef = useRef(aggregation);
+  aggregationRef.current = aggregation;
 
   // Pooled across frames; grown only when the bucket grid gets bigger.
   const bucketsRef = useRef(createBucketSet(CATEGORIES.length, 64));
@@ -110,12 +141,13 @@ export function BarChart({
       // Bucket boundaries are absolute, so the frame only changes when the
       // window crosses one — quantising the key here means a paused-but-
       // following chart redraws when it must, not every frame.
-      const bucketMs = niceTimeStep(
+      const bucketMs = resolveBucketMs(
+        aggregationRef.current,
         w.span,
-        Math.max(2, Math.floor(frame.rect.width / TARGET_GROUP_PX)),
+        frame.rect.width,
       );
       const d = domainRef.current;
-      return `${buffer.revision}|${Math.floor(w.end / bucketMs)}|${frame.width}|${frame.height}|${frame.theme.mode}|${seriesRef.current.length}|${d[0]}|${d[1]}`;
+      return `${buffer.revision}|${Math.floor(w.end / bucketMs)}|${frame.width}|${frame.height}|${frame.theme.mode}|${seriesRef.current.length}|${d[0]}|${d[1]}|${aggregationRef.current}`;
     },
     [buffer, window],
   );
@@ -130,21 +162,14 @@ export function BarChart({
       const visible = seriesRef.current;
       const domain = domainRef.current;
 
-      const targetBuckets = Math.max(
-        2,
-        Math.floor(rect.width / TARGET_GROUP_PX),
+      const bucketMs = resolveBucketMs(
+        aggregationRef.current,
+        w.span,
+        rect.width,
       );
-      const bucketMs = niceTimeStep(w.span, targetBuckets);
       // Snap to absolute time so buckets are stable as the window scrolls.
-      const rangeStart = Math.floor(w.start / bucketMs) * bucketMs;
-      // floor + 1, not ceil: buckets are half-open, so a sample landing exactly
-      // on the right edge belongs to bucket floor((end - start) / width) and
-      // needs a bucket to exist at that index. `ceil` silently drops it
-      // whenever the span is an exact multiple of the bucket width.
-      const bucketCount = Math.max(
-        1,
-        Math.floor((w.end - rangeStart) / bucketMs) + 1,
-      );
+      const rangeStart = snapToBucket(w.start, bucketMs);
+      const bucketCount = bucketCountFor(rangeStart, w.end, bucketMs);
 
       const xMap = linearMap(
         rangeStart,

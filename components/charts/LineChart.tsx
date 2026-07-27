@@ -20,10 +20,13 @@ import {
   type PlotRect,
   type VertexBuffer,
 } from "@/lib/canvasUtils";
+import { projectBuckets } from "@/lib/canvasUtils";
+import { AggregationCache } from "@/lib/aggregation";
 import { buildSeries, type SeriesDescriptor } from "@/lib/series";
 import type { SeriesRingBuffer } from "@/lib/ringBuffer";
 import {
   CATEGORIES,
+  type AggregationWindow,
   type Category,
   type PerformanceMetrics,
 } from "@/lib/types";
@@ -46,6 +49,8 @@ export interface LineChartProps {
   onViewportChange?: (viewport: ViewportState) => void;
   /** Whether the window is currently tracking the live edge. */
   live?: boolean;
+  /** Bucket size. "raw" plots every sample through min/max decimation. */
+  aggregation?: AggregationWindow;
   yDomain?: readonly [number, number];
   forceRedraw?: boolean;
   onMetrics?: (metrics: PerformanceMetrics) => void;
@@ -67,6 +72,7 @@ export function LineChart({
   viewportRef,
   onViewportChange,
   live = true,
+  aggregation = "raw",
   yDomain = [0, 100],
   forceRedraw = false,
   onMetrics,
@@ -84,6 +90,12 @@ export function LineChart({
   seriesRef.current = series;
   const domainRef = useRef(yDomain);
   domainRef.current = yDomain;
+  const aggregationRef = useRef(aggregation);
+  aggregationRef.current = aggregation;
+
+  // Owned here so its arrays are allocated once and reused across frames.
+  const aggCacheRef = useRef(new AggregationCache(CATEGORIES.length));
+  const maskRef = useRef(new Uint8Array(CATEGORIES.length));
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const getExtent = useCallback(
@@ -106,7 +118,7 @@ export function LineChart({
       const d = domainRef.current;
       // Span belongs in the key as well as start: a zoom that keeps the right
       // edge fixed changes only the span, and would otherwise not redraw.
-      return `${buffer.revision}|${w.start}|${w.span}|${frame.width}|${frame.height}|${frame.theme.mode}|${seriesRef.current.length}|${d[0]}|${d[1]}`;
+      return `${buffer.revision}|${w.start}|${w.span}|${frame.width}|${frame.height}|${frame.theme.mode}|${seriesRef.current.length}|${d[0]}|${d[1]}|${aggregationRef.current}`;
     },
     [buffer, window],
   );
@@ -163,15 +175,45 @@ export function LineChart({
       );
       for (const s of seriesRef.current) active[s.id] = pool[s.id];
 
-      const examined = projectSeries(
+      const mask = maskRef.current;
+      mask.fill(0);
+      for (const s of seriesRef.current) mask[s.id] = 1;
+
+      const aggregated = aggCacheRef.current.compute(
         buffer,
+        aggregationRef.current,
+        w.start,
+        w.end,
+        mask,
         CATEGORIES.length,
-        buffer.lowerBound(w.start),
-        buffer.length,
-        xMap,
-        yMap,
-        active as VertexBuffer[],
       );
+
+      let examined: number;
+      if (aggregated === null) {
+        // Raw path: every sample, folded to two vertices per pixel column.
+        examined = projectSeries(
+          buffer,
+          CATEGORIES.length,
+          buffer.lowerBound(w.start),
+          buffer.length,
+          xMap,
+          yMap,
+          active as VertexBuffer[],
+        );
+      } else {
+        // Aggregated path: one vertex per non-empty bucket.
+        projectBuckets(
+          aggregated.set,
+          CATEGORIES.length,
+          aggregated.bucketCount,
+          aggregated.rangeStart,
+          aggregated.bucketMs,
+          xMap,
+          yMap,
+          active,
+        );
+        examined = aggregated.examined;
+      }
 
       clipToPlot(ctx, rect);
       let vertices = 0;

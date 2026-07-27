@@ -17,10 +17,18 @@ import {
   niceStep,
   timeTicks,
 } from "@/lib/canvasUtils";
+import {
+  createVertexBuffer,
+  projectBuckets,
+  vertexCapacityFor,
+  type VertexBuffer,
+} from "@/lib/canvasUtils";
+import { AggregationCache } from "@/lib/aggregation";
 import { SCATTER_SERIES_LIMIT, buildSeries } from "@/lib/series";
 import type { SeriesRingBuffer } from "@/lib/ringBuffer";
 import {
   CATEGORIES,
+  type AggregationWindow,
   type Category,
   type PerformanceMetrics,
 } from "@/lib/types";
@@ -46,6 +54,8 @@ export interface ScatterPlotProps {
   viewportRef: MutableRefObject<ViewportState>;
   onViewportChange?: (viewport: ViewportState) => void;
   live?: boolean;
+  /** Bucket size. "raw" draws one mark per sample. */
+  aggregation?: AggregationWindow;
   yDomain?: readonly [number, number];
   forceRedraw?: boolean;
   onMetrics?: (metrics: PerformanceMetrics) => void;
@@ -71,6 +81,7 @@ export function ScatterPlot({
   viewportRef,
   onViewportChange,
   live = true,
+  aggregation = "raw",
   yDomain = [0, 100],
   forceRedraw = false,
   onMetrics,
@@ -92,8 +103,14 @@ export function ScatterPlot({
   seriesRef.current = series;
   const domainRef = useRef(yDomain);
   domainRef.current = yDomain;
+  const aggregationRef = useRef(aggregation);
+  aggregationRef.current = aggregation;
 
   const gridRef = useRef(createStampGrid(1, 1, DEDUP_CELL));
+  const aggCacheRef = useRef(new AggregationCache(CATEGORIES.length));
+  const maskRef = useRef(new Uint8Array(CATEGORIES.length));
+  // Only used on the aggregated path, where marks come from bucket means.
+  const poolRef = useRef<VertexBuffer[]>([]);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const getExtent = useCallback(
@@ -114,7 +131,7 @@ export function ScatterPlot({
       const w = window();
       if (w === null) return "empty";
       const d = domainRef.current;
-      return `${buffer.revision}|${w.start}|${w.span}|${frame.width}|${frame.height}|${frame.theme.mode}|${seriesRef.current.length}|${d[0]}|${d[1]}`;
+      return `${buffer.revision}|${w.start}|${w.span}|${frame.width}|${frame.height}|${frame.theme.mode}|${seriesRef.current.length}|${d[0]}|${d[1]}|${aggregationRef.current}`;
     },
     [buffer, window],
   );
@@ -161,28 +178,86 @@ export function ScatterPlot({
       );
       const grid = gridRef.current;
 
-      const startIndex = buffer.lowerBound(w.start);
-      const examined = buffer.length - startIndex;
+      const mask = maskRef.current;
+      mask.fill(0);
+      for (const s of seriesRef.current) mask[s.id] = 1;
+
+      const aggregated = aggCacheRef.current.compute(
+        buffer,
+        aggregationRef.current,
+        w.start,
+        w.end,
+        mask,
+        CATEGORIES.length,
+      );
 
       clipToPlot(ctx, rect);
       let marks = 0;
-      for (const descriptor of seriesRef.current) {
-        // A fresh pass per series: two series may legitimately occupy the
-        // same pixel, and dropping the second would hide a real overlap.
-        beginStampPass(grid);
-        marks += drawPointsBatched(
-          ctx,
-          buffer,
-          descriptor.id,
-          startIndex,
-          buffer.length,
+      let examined: number;
+
+      if (aggregated === null) {
+        const startIndex = buffer.lowerBound(w.start);
+        examined = buffer.length - startIndex;
+        for (const descriptor of seriesRef.current) {
+          // A fresh pass per series: two series may legitimately occupy the
+          // same pixel, and dropping the second would hide a real overlap.
+          beginStampPass(grid);
+          marks += drawPointsBatched(
+            ctx,
+            buffer,
+            descriptor.id,
+            startIndex,
+            buffer.length,
+            xMap,
+            yMap,
+            rect,
+            descriptor.color,
+            MARK_SIZE,
+            grid,
+          );
+        }
+      } else {
+        // One mark per bucket. De-duplication is pointless here — buckets are
+        // already distinct positions — so the marks are drawn slightly larger
+        // to read as deliberate summary points rather than sparse samples.
+        examined = aggregated.examined;
+        const capacity = vertexCapacityFor(rect.width);
+        if (
+          poolRef.current.length !== CATEGORIES.length ||
+          (poolRef.current[0]?.xs.length ?? 0) < capacity
+        ) {
+          poolRef.current = CATEGORIES.map(() => createVertexBuffer(capacity));
+        }
+        const pool = poolRef.current;
+        const active: Array<VertexBuffer | undefined> = new Array(
+          CATEGORIES.length,
+        );
+        for (const s of seriesRef.current) active[s.id] = pool[s.id];
+
+        projectBuckets(
+          aggregated.set,
+          CATEGORIES.length,
+          aggregated.bucketCount,
+          aggregated.rangeStart,
+          aggregated.bucketMs,
           xMap,
           yMap,
-          rect,
-          descriptor.color,
-          MARK_SIZE,
-          grid,
+          active,
         );
+
+        const size = MARK_SIZE * 2;
+        const half = size / 2;
+        for (const descriptor of seriesRef.current) {
+          const vb = pool[descriptor.id];
+          if (vb === undefined || vb.count === 0) continue;
+          ctx.beginPath();
+          for (let i = 0; i < vb.count; i++) {
+            ctx.rect(vb.xs[i]! - half, vb.ys[i]! - half, size, size);
+          }
+          ctx.fillStyle = descriptor.color;
+          ctx.fill();
+          marks += vb.count;
+        }
       }
       ctx.restore();
 
