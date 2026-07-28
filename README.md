@@ -1,5 +1,7 @@
 # Performance-Critical Data Visualization Dashboard
 
+**Live demo — <https://performance-critical-data-visualiza-orcin.vercel.app/dashboard>**
+
 A real-time dashboard rendering 10,000+ streaming data points at 60 fps, with
 every chart drawn from scratch on the Canvas 2D API.
 
@@ -81,6 +83,78 @@ the Server Component and then generates its own ticks, because driving a 100 ms
 cadence over HTTP would be 10 round trips a second. The route exists so the data
 has a real, inspectable boundary and a seam where a genuine backend could be
 swapped in.
+
+---
+
+## Verifying the deployment
+
+A production deployment can fail in ways localhost never will: a case-sensitive
+Linux filesystem, minified output, cold serverless starts, HTTPS, and a fresh
+browser profile with an empty cache. What follows was actually run against the
+live URL — the numbers are from that run, not from localhost.
+
+### Cold load
+
+Load the deployed `/dashboard` in a **fresh profile or a private window**, so
+nothing is served from cache.
+
+| Measured on the live build | |
+|---|---|
+| First byte | 232 ms |
+| Interactive (canvas drawing, table populated) | ~1.1 s |
+| DOMContentLoaded | 1.02 s |
+| Transferred | 28.2 KiB |
+| HTML payload | 75.3 KiB |
+| `x-vercel-cache` | `MISS` (correct — the route is `no-store`) |
+
+The first hit after an idle period is slower again because `/dashboard` is a
+serverless function that generates the backfill per request. Repeat loads settle
+to ~750 ms.
+
+### FPS counter
+
+The monitor is bottom-right. Confirm, in order:
+
+1. It is **mounted and on screen** without scrolling.
+2. It shows **`— FPS` for the first half-second**, then a real number. The dash
+   is deliberate: the counter has a 500 ms sampling window, and printing `0 FPS`
+   before it closes would assert a measurement nobody took.
+3. The number is **live and non-zero** — it changes between reads.
+4. The **sparkline has painted pixels** (not an empty canvas), with the 60 fps
+   reference line visible.
+
+Observed live: `52 FPS`, draw `0.80 ms`, and under stress mode `52.9 fps` with a
+median frame interval of **16.70 ms** — the same flat 60 fps cadence measured
+locally, so nothing regressed in the deployed bundle.
+
+### Memory display
+
+1. `Heap` shows a plausible MB figure in Chromium. Observed live: **4.1 MB**,
+   with the ring buffer reporting **244 KiB** and exactly **10,000** samples.
+2. In a browser without `performance.memory` (Firefox, Safari) it must read
+   `n/a` with the explanatory note — **not** a fabricated number.
+3. `Trend` reads **`warming up… 90s`** at first. This is not a stall: the first
+   minute after load is one-time warm-up (JIT, pooled buffers, the occupancy
+   grid), and a shorter window reports that warm-up as ongoing growth. On the
+   deployed build a 40-second window read **+95 MB/hr** for a heap that is flat
+   once warm, which is why the threshold is 90 seconds.
+
+   **Let the demo run ~2 minutes before pointing at the trend figure.**
+
+### Everything else worth confirming
+
+- **Streaming survived deployment** — tick spacing at the live edge is a uniform
+  **100 ms**, so the server-generated history joins the client's live ticks with
+  no seam.
+- **Virtualisation survived minification** — 10,000 rows addressable, **25 in
+  the DOM**.
+- **No hydration mismatch and no page errors** — worth checking explicitly,
+  because hydration warnings are downgraded in production builds and are easy
+  to miss.
+- **No failed or 4xx/5xx subresources.**
+- **API determinism over the network** — two live calls to
+  `/api/data?count=400&seed=7&endTime=1700000000000` returned byte-identical
+  values.
 
 ---
 
@@ -196,12 +270,14 @@ the repository and are not committed, so `npm test` does not exist.
 That is a genuine gap. The logic in `lib/` is pure and framework-free
 specifically so it *can* be unit-tested; nothing about the design prevents it.
 
-### 6. Not deployed
+### 6. ~~Not deployed~~ — now live
 
-No live demo link yet. The app builds and runs cleanly in production mode
-(`next build` succeeds with no errors or warnings) and has no runtime
-environment dependencies, so deploying to Vercel should be uneventful — but
-until it is actually deployed, that is a claim rather than a fact.
+Deployed to Vercel:
+**<https://performance-critical-data-visualiza-orcin.vercel.app/dashboard>**
+
+Verified against the deployed build, not just localhost — see
+[Verifying the deployment](#verifying-the-deployment) below for what was
+checked and the numbers it produced.
 
 ---
 
