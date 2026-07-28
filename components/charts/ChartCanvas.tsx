@@ -82,6 +82,12 @@ export interface ChartCanvasProps {
   interactionLatencyRef?: MutableRefObject<number>;
   /** Rendered above the canvas — legends, notes. */
   children?: ReactNode;
+  /**
+   * Rendered inside the canvas's positioned container, on top of it — hover
+   * layers and tooltips. Kept separate from `children` because these must be
+   * able to position themselves against the canvas rather than flow above it.
+   */
+  overlay?: ReactNode;
 }
 
 /** Latest props, read by the loop through a ref so it never has to restart. */
@@ -123,6 +129,7 @@ export function ChartCanvas({
   canvasRefOut,
   interactionLatencyRef,
   children,
+  overlay,
 }: ChartCanvasProps) {
   const [containerRef, size] = useElementSize<HTMLDivElement>();
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -334,6 +341,7 @@ export function ChartCanvas({
           role="img"
           aria-label={ariaLabel}
         />
+        {overlay}
       </div>
     </div>
   );

@@ -173,6 +173,20 @@ runs at display rate and reads whatever is in the buffer at that instant.
 double-click to reset. Time-range presets (30s / 1m / 5m / 15m / All) and a live
 indicator. Measured latency: **0.6–0.7 ms**.
 
+**Crosshair and tooltip** (line chart) — hovering snaps a vertical rule to the
+nearest *real* sample and reads out every visible series at that instant, with
+the full `HH:MM:SS.mmm` timestamp. It is a readout, not a ruler: the rule lands
+on the data point, not under the cursor. When an aggregation window is active it
+reports the **bucket mean** the chart actually drew rather than an underlying
+raw sample, and an empty bucket shows nothing rather than zero. Spikes flagged
+by the generator are marked in words as well as with a ring.
+
+It renders on a **separate overlay canvas** that is `display: none` until
+pointed at, so a chart nobody is hovering pays nothing for it, and moving the
+mouse never re-rasterises the main polyline. Measured cost of one update:
+**0.1–0.2 ms median, 0.5 ms p95**. Frame rate is unchanged — see
+[PERFORMANCE.md](PERFORMANCE.md#crosshair-and-tooltip).
+
 **Aggregation** — raw / 1 min / 5 min / 1 hour, by averaging, cached against the
 buffer revision so the scan runs once per data tick rather than once per frame.
 
@@ -223,14 +237,20 @@ already produces the (series × time-bucket) grid a heatmap needs, and
 sequential colour ramp — the palette reference specifies one (single hue,
 light→dark, never a rainbow) but it is not wired up.
 
-### 2. Crosshair and tooltips — not built
+### 2. ~~Crosshair and tooltips~~ — built, but **line chart only**
 
-Hovering a chart does nothing. This was deferred when interactions were built
-and never came back. It is the most visible gap for a reviewer, because a chart
-that can be panned and zoomed but not inspected feels half-finished. The
-pixel→data inverse mapping it needs (`invertMap`) already exists and is used by
-pan/zoom, and the ring buffer's `lowerBound` (0.09 µs) would make hit-testing
-essentially free.
+The line chart has a crosshair and tooltip (see Features above). Bar and Scatter
+do not — hovering them still does nothing.
+
+That is a deliberate stopping point rather than an oversight. The lookup in
+[`lib/crosshair.ts`](lib/crosshair.ts) is generic and the overlay component
+takes the chart's geometry through a ref, so extending it is mostly wiring; but
+each chart needs a different hit test to be honest about what it reports. A bar
+chart should report the bucket under the cursor and highlight that bar, and a
+scatter needs a 2-D proximity search rather than a nearest-in-time one — the
+`StampGrid` occupancy grid already in `canvasUtils.ts` is the right structure
+for it. Shipping a time-only hit test on all three would have given the scatter
+plot a tooltip that quietly reported the wrong point.
 
 ### 3. Responsive / mobile — not implemented, and measured to be broken
 
@@ -345,6 +365,7 @@ lib/
   canvasUtils.ts              Scales, ticks, decimation, batching, axes
   viewport.ts                 Pan/zoom maths, as pure functions
   aggregation.ts              Time-bucket aggregation with caching
+  crosshair.ts                Nearest-point / bucket lookup for the tooltip
   serialization.ts            Columnar server→client wire format
   series.ts, theme.ts, types.ts
 hooks/
@@ -353,7 +374,8 @@ hooks/
   useVirtualization.ts        Windowed list rendering
   useTimeWindow.ts, useChartTheme.ts, useElementSize.ts, useThemeMode.ts
 components/
-  charts/     ChartCanvas (shared loop), LineChart, BarChart, ScatterPlot
+  charts/     ChartCanvas (shared loop), LineChart, BarChart, ScatterPlot,
+              ChartCrosshair (hover overlay), ChartLegend
   controls/   TimeRangeSelector, FilterPanel, AggregationControl
   ui/         DataTable, MetricsPanel, PerformanceMonitor
 ```

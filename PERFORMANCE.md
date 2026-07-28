@@ -333,6 +333,96 @@ Axes-only is 0.17 ms → 120 fps; with polylines it is 0.53 ms → 66 fps. A
 spotting JS regressions but it understates true frame cost, and no figure in
 this document treats it as the whole story.
 
+## Crosshair and tooltip
+
+Added after the numbers above were taken, so the question was specifically
+whether it costs frames. It does not.
+
+**Cost of one crosshair update**, measured in-page over 3,000 consecutive
+pointer moves against the production build:
+
+| | |
+|---|---|
+| Median | **0.10–0.20 ms** |
+| p95 | 0.20–0.50 ms |
+| Nearest-point resolve alone | **0.229 µs**, allocation-free over 200,000 calls |
+
+**Frame rate with and without hovering.** Three arms — no pointer, cursor parked
+on the plot, and a synthetic pointer swept across the plot *once per frame*
+(harsher than a real mouse, which the browser coalesces):
+
+| Arm | Mean FPS | Best frame gap | Frames < 20 ms | JS draw |
+|---|---|---|---|---|
+| No pointer | 63.1 | **16.60 ms** | 95% | 0.61 ms |
+| Cursor parked | 61.1 | **16.60 ms** | 95% | 0.79 ms |
+| Sweeping (1,083 moves) | 59.9 | **16.60 ms** | 93% | 0.75 ms |
+
+All three arms reach the same 16.60 ms frame interval. The draw figure rises by
+~0.2 ms while hovering because `refresh()` is called at the end of the chart's
+timed draw, so that number honestly includes the crosshair's own repaint.
+
+### Why it is a second canvas
+
+The obvious implementation — draw the crosshair inside the chart's `draw`
+callback — would have been the expensive one. Every pointer move would change
+the frame signature, and each invalidation re-rasterises the full decimated
+polyline: the ~8 ms of GPU work identified as the frame-rate limiter below.
+Moving the mouse would then cost more than the data stream does.
+
+On its own layer the hover repaint touches one line and a handful of markers,
+and the base chart is never invalidated. The layer is `display: none` until
+pointed at — not merely `visibility: hidden`, because a hidden layer is still a
+layer to composite, and a chart nobody is hovering should pay nothing.
+
+Two further details earned their place by measurement:
+
+- **A dirty check on the overlay.** Two things request a repaint: pointer moves,
+  and `refresh()` after every base frame. Without a signature comparison a
+  hovering pointer repaints *twice per frame*, and a stationary cursor repaints
+  at display rate to show a reading that only changes at 10 Hz. Adding the check
+  brought the hover cost inside the 0.35 ms bar it was previously missing.
+- **No `will-change: transform`** on the tooltip, despite it being moved by
+  transform — it would promote the element to its own compositing layer
+  permanently, including while hidden. An A/B/A/B toggling it at runtime could
+  not separate its cost from noise, so this is a decision on principle rather
+  than a measured win; it is recorded that way rather than dressed up.
+
+### A measurement caveat worth recording
+
+Frame-rate numbers for the line chart are **bimodal and machine-sensitive**, and
+this took several runs to establish rather than assume. The chart needs ~8 ms of
+polyline rasterisation against an 8.33 ms vsync interval on a 120 Hz panel, so it
+sits exactly on a boundary: with headroom it holds 16.6 ms frames, and under
+external GPU load from other applications every arm drops together to 25 ms
+(3 vsync intervals, ~40 fps). Runs on a quiet machine have also shown it reaching
+the full 8.30 ms / 120 fps.
+
+Consequences for anyone reproducing this:
+
+- **Measure the arms interleaved, not back to back.** Sequential A/B runs
+  attribute session drift to whichever change was measured second. An early
+  sequential comparison here showed a 9% "regression" that interleaving proved
+  did not exist.
+- **Compare arms relatively; the absolute figure is a property of the desktop.**
+- **Keep the window foregrounded.** Headful Chrome throttles `requestAnimationFrame`
+  when its window is occluded — that alone produced readings from 0 fps to 120 fps
+  for identical code, and was the single largest source of noise in these runs.
+  `--disable-backgrounding-occluded-windows` is not sufficient; the harness calls
+  `Page.bringToFront` before every sampling window.
+
+### Correctness, not just speed
+
+The tooltip reports what the chart drew. When an aggregation window is active it
+reads the **bucket mean** out of the same `BucketSet` the frame was rendered
+from, rather than looking up a raw sample that appears nowhere on screen. An
+empty bucket resolves to *nothing* rather than to zero, matching `projectBuckets`
+— a gap in the data is not a reading of zero.
+
+Verified against the generator's own output: every resolved timestamp is a real
+sample, every value matches the source data exactly, the snap moves the crosshair
+by under 1 px, and bucket means match a hand-computed mean of the 600 raw samples
+behind them.
+
 ## Scaling strategy: 100,000+ points
 
 The render path is already there; the data path is what would need work.
@@ -424,3 +514,11 @@ Then in Chrome at <http://localhost:3000/dashboard>:
 
 The in-page performance monitor (bottom right) shows live FPS, draw time,
 dropped frames, heap size and the memory trend without opening DevTools.
+
+**If your line-chart FPS reads ~40 rather than ~60**, before assuming a
+regression check that the Chrome window is genuinely in the foreground and that
+nothing else is using the GPU. As recorded above, the line chart sits on a vsync
+boundary and other applications tip it across; the diagnostic is that Bar and
+Scatter still report 118–120 fps in the same session, which shows the GPU is not
+saturated and the loop is healthy. Hover the chart and compare — if the crosshair
+arm matches the idle arm, nothing in the render path has changed.

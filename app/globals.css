@@ -86,3 +86,86 @@ a {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
+
+/*
+ * Chart crosshair tooltip.
+ *
+ * Geometry here is mirrored by the TIP_* constants in ChartCrosshair.tsx, which
+ * computes the tooltip's height to place it. Reading offsetHeight instead would
+ * force a synchronous layout on every pointer move; fixing the width and the
+ * line height in CSS is what lets that read be skipped. Keep the two in step.
+ */
+.chart-tooltip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 178px;
+  padding: 8px 10px;
+  visibility: hidden;
+  pointer-events: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text);
+  /*
+   * Deliberately no `will-change: transform`, despite this element being moved
+   * by transform. The hint promotes it to its own compositing layer for as long
+   * as it exists — including the ~100% of the time it is hidden — which puts a
+   * permanent extra layer over the chart canvas to buy nothing.
+   *
+   * Honest note on the evidence: an A/B/A/B toggling the property at runtime
+   * could not separate its cost from measurement noise, because the line chart
+   * sits right on a vsync boundary (see PERFORMANCE.md) and tips between 16.6ms
+   * and 25ms frames under small changes in external GPU load. So this is
+   * removed on principle, not on a measured win — but a hint that only ever
+   * costs is not worth keeping either way.
+   */
+}
+
+.chart-tooltip__time {
+  height: 18px;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.chart-tooltip__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 18px;
+}
+
+.chart-tooltip__swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+
+/* Takes the slack so the flag and value sit flush right. */
+.chart-tooltip__label {
+  flex: 1 1 auto;
+  color: var(--text-secondary);
+}
+
+/*
+ * Anomalies are called out in words, not by the marker ring alone — the ring is
+ * a second encoding of the same fact, not the only one.
+ */
+.chart-tooltip__flag {
+  display: none;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.chart-tooltip__value {
+  flex: 0 0 auto;
+  font-size: 12px;
+}

@@ -1,8 +1,20 @@
 "use client";
 
-import { memo, useCallback, useMemo, useRef, type MutableRefObject } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  type MutableRefObject,
+} from "react";
 import { ChartCanvas, type ChartFrame, type DrawResult } from "./ChartCanvas";
 import { ChartLegend } from "./ChartLegend";
+import {
+  ChartCrosshair,
+  createCrosshairFrame,
+  type CrosshairHandle,
+} from "./ChartCrosshair";
 import { AXIS_FONT } from "@/lib/theme";
 import {
   clearCanvas,
@@ -25,6 +37,7 @@ import { AggregationCache } from "@/lib/aggregation";
 import { buildSeries, type SeriesDescriptor } from "@/lib/series";
 import type { SeriesRingBuffer } from "@/lib/ringBuffer";
 import {
+  AGGREGATION_WINDOW_LABELS,
   CATEGORIES,
   type AggregationWindow,
   type Category,
@@ -111,6 +124,50 @@ function LineChartImpl({
 
   const window = useTimeWindow(buffer, viewportRef);
 
+  // Hover state lives entirely outside React: `draw` publishes the frame's
+  // maps here, and the overlay reads them on pointer move. Neither direction
+  // triggers a render.
+  const crosshairFrameRef = useRef(createCrosshairFrame());
+  const crosshairRef = useRef<CrosshairHandle | null>(null);
+
+  /**
+   * Hover binding for the crosshair.
+   *
+   * Bound here rather than inside the overlay because `canvasRef` is filled by
+   * an effect in `ChartCanvas`, and a child's effects run before its parent's —
+   * this component is the parent, so by the time this runs the element exists.
+   * The same ordering is what lets `useChartInteraction` bind above.
+   *
+   * These listeners never touch React state. A pointermove at 120Hz driving a
+   * `setState` would reconcile the tree 120 times a second to move a line two
+   * pixels.
+   */
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (el === null) return;
+
+    const onMove = (e: PointerEvent) => {
+      // Touch and pen have no hover state. A tooltip pinned under a dragging
+      // finger covers the very data it is describing, and there is no gesture
+      // to dismiss it.
+      if (e.pointerType !== "mouse") return;
+      const bounds = el.getBoundingClientRect();
+      crosshairRef.current?.move(e.clientX - bounds.left, e.clientY - bounds.top);
+    };
+    const onLeave = () => crosshairRef.current?.leave();
+
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("pointerleave", onLeave);
+    el.addEventListener("pointercancel", onLeave);
+    return () => {
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerleave", onLeave);
+      el.removeEventListener("pointercancel", onLeave);
+      // No `leave()` here: this effect only tears down on unmount, and the
+      // overlay's DOM is being removed alongside it.
+    };
+  }, []);
+
   const signature = useCallback(
     (frame: ChartFrame): string => {
       const w = window();
@@ -128,7 +185,11 @@ function LineChartImpl({
       const { ctx, rect, theme: t, axisTheme } = frame;
       const w = window();
       clearCanvas(ctx, frame.width, frame.height, t.surface);
-      if (w === null) return { rendered: 0, examined: 0 };
+      if (w === null) {
+        crosshairFrameRef.current.ready = false;
+        crosshairRef.current?.refresh();
+        return { rendered: 0, examined: 0 };
+      }
 
       const domain = domainRef.current;
       const xMap = linearMap(w.start, w.end, rect.x, rect.x + rect.width);
@@ -226,6 +287,22 @@ function LineChartImpl({
       ctx.restore();
 
       drawDirectLabels(ctx, seriesRef.current, pool, rect);
+
+      // Publish this frame's geometry for the hover layer, then let it repaint
+      // if a cursor is parked on the chart — without which the readout would
+      // drift off the line as the live window scrolls underneath it. Mutated in
+      // place, and `refresh` returns immediately when nothing is hovering, so
+      // the cost to a chart nobody is pointing at is one branch per frame.
+      const hover = crosshairFrameRef.current;
+      hover.ready = true;
+      hover.width = frame.width;
+      hover.height = frame.height;
+      hover.rect = rect;
+      hover.xMap = xMap;
+      hover.yMap = yMap;
+      hover.agg = aggregated;
+      crosshairRef.current?.refresh();
+
       return { rendered: vertices, examined };
     },
     [buffer, window],
@@ -242,6 +319,16 @@ function LineChartImpl({
       onMetrics={onMetrics}
       canvasRefOut={canvasRef}
       interactionLatencyRef={latencyRef}
+      overlay={
+        <ChartCrosshair
+          ref={crosshairRef}
+          frameRef={crosshairFrameRef}
+          buffer={buffer}
+          series={series}
+          theme={theme}
+          aggregationLabel={AGGREGATION_WINDOW_LABELS[aggregation]}
+        />
+      }
     >
       <ChartLegend series={series} mark="line" />
     </ChartCanvas>
