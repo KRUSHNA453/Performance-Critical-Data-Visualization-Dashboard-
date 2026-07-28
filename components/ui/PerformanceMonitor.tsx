@@ -20,8 +20,16 @@ const HEAP_HISTORY = 240;
  * Extrapolating to an hour from a few seconds of GC sawtooth produces numbers
  * like "-1116 MB/hr" — arithmetically correct, physically meaningless, and
  * worse than showing nothing, because it invites the reader to believe it.
+ *
+ * 90 seconds rather than 40: the first minute after load is dominated by
+ * one-time warm-up (JIT, the pooled vertex buffers, the scatter occupancy
+ * grid, the table's index map), and a window that straddles it reports that
+ * warm-up as ongoing growth. Measured on the deployed build, a 40s window read
+ * +95 MB/hr for a heap that is flat once warm. Waiting until the window is
+ * mostly past warm-up costs a minute of patience and buys a number that means
+ * what it says.
  */
-const MIN_TREND_WINDOW_MS = 40_000;
+const MIN_TREND_WINDOW_MS = 90_000;
 
 /** Width of each baseline bucket. One collection typically lands per bucket. */
 const TREND_BUCKET_MS = 10_000;
@@ -124,9 +132,19 @@ export interface PerformanceMonitorProps {
 export function PerformanceMonitor({ drawMetrics }: PerformanceMonitorProps) {
   const theme = useChartTheme();
   const [collapsed, setCollapsed] = useState(false);
-  const [fps, setFps] = useState(0);
+  /** null until the first sampling window closes — distinct from a real zero. */
+  const [fps, setFps] = useState<number | null>(null);
   const [heapMb, setHeapMb] = useState<number | null>(null);
   const [trend, setTrend] = useState<number | null>(null);
+  /**
+   * Whether this browser exposes `performance.memory` at all.
+   *
+   * Kept separate from `heapMb` because "not measured yet" and "cannot be
+   * measured here" are different states, and conflating them made the page
+   * claim, for the first half-second after load, that the browser did not
+   * support heap reporting when it plainly did.
+   */
+  const [heapSupported, setHeapSupported] = useState<boolean | null>(null);
 
   const sparkRef = useRef<HTMLCanvasElement>(null);
   const fpsHistoryRef = useRef<number[]>([]);
@@ -158,6 +176,7 @@ export function PerformanceMonitor({ drawMetrics }: PerformanceMonitorProps) {
       const memory = (
         performance as Performance & { memory?: { usedJSHeapSize: number } }
       ).memory;
+      setHeapSupported(memory !== undefined);
       if (memory !== undefined) {
         const bytes = memory.usedJSHeapSize;
         const samples = heapHistoryRef.current;
@@ -270,12 +289,14 @@ export function PerformanceMonitor({ drawMetrics }: PerformanceMonitorProps) {
             width: 7,
             height: 7,
             borderRadius: "50%",
-            background: fpsColor(fps),
+            // Muted until there is a real reading — a green dot beside "0 FPS"
+            // would assert a measurement that has not been taken.
+            background: fps === null ? "var(--text-muted)" : fpsColor(fps),
             flex: "0 0 auto",
           }}
         />
         <span className="mono" style={{ fontWeight: 600 }}>
-          {fps.toFixed(0)} FPS
+          {fps === null ? "— FPS" : `${fps.toFixed(0)} FPS`}
         </span>
         <span style={{ marginLeft: "auto", color: "var(--text-muted)" }}>
           {collapsed ? "▲" : "▼"}
@@ -312,7 +333,11 @@ export function PerformanceMonitor({ drawMetrics }: PerformanceMonitorProps) {
 
             <dt>Heap</dt>
             <dd className="mono" style={{ margin: 0, color: "var(--text)" }}>
-              {heapMb === null ? "n/a" : `${heapMb.toFixed(1)} MB`}
+              {heapMb !== null
+                ? `${heapMb.toFixed(1)} MB`
+                : heapSupported === false
+                  ? "n/a"
+                  : "—"}
             </dd>
 
             <dt title="Growth of the post-GC heap baseline">Trend</dt>
@@ -321,11 +346,13 @@ export function PerformanceMonitor({ drawMetrics }: PerformanceMonitorProps) {
               style={{ margin: 0, color: trendOk ? GOOD : WARNING }}
             >
               {trend === null
-                ? `sampling… ${Math.ceil(MIN_TREND_WINDOW_MS / 1000)}s`
+                ? `warming up… ${Math.ceil(MIN_TREND_WINDOW_MS / 1000)}s`
                 : `${trend >= 0 ? "+" : ""}${trend.toFixed(2)} MB/hr`}
             </dd>
           </dl>
-          {heapMb === null && (
+          {/* Only once we know the API is genuinely absent — not merely
+              before the first sample has been taken. */}
+          {heapSupported === false && (
             <p
               style={{
                 margin: "6px 0 0",
