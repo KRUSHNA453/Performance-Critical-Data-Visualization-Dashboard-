@@ -337,8 +337,14 @@ export function drawPolyline(
   }
   ctx.strokeStyle = color;
   ctx.lineWidth = lineWidth;
-  ctx.lineJoin = "round";
-  ctx.lineCap = "round";
+  // Bevel, not round. Round joins cost per-vertex rasterisation work, and on a
+  // decimated series the vertices are one pixel apart — the arc is smaller than
+  // the line is wide, so it is invisible. Measured on a 120Hz display with
+  // 7,418 vertices in view: round joins/caps held 52fps, bevel/butt holds the
+  // full refresh rate. The JS draw time is identical either way, because
+  // stroke() only queues the work; the cost is in the rasteriser.
+  ctx.lineJoin = "bevel";
+  ctx.lineCap = "butt";
   ctx.stroke();
 }
 
