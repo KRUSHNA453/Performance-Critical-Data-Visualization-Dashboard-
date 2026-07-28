@@ -14,16 +14,33 @@ export const SAMPLE_INTERVAL_MS = 100;
  * simulated telemetry. Seeding matters here: the same seed replays the exact
  * same dataset, which is what makes performance numbers in PERFORMANCE.md
  * comparable between runs.
+ *
+ * Held as an explicit integer rather than a closure so it can be captured in a
+ * snapshot and resumed — see `DataGenerator.snapshot`.
  */
-function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return function next(): number {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+function mulberry32Next(state: number): { value: number; state: number } {
+  const a = (state + 0x6d2b79f5) >>> 0;
+  let t = a;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return { value: ((t ^ (t >>> 14)) >>> 0) / 4294967296, state: a };
+}
+
+/**
+ * Everything needed to resume a walk exactly where it stopped.
+ *
+ * Plain JSON so it can cross the server/client boundary: the server generates
+ * the backfill, hands the client this snapshot, and the client's live ticks
+ * continue the same walk with no discontinuity at the join.
+ */
+export interface GeneratorSnapshot {
+  rngState: number;
+  /** Current level of each series, indexed by category id. */
+  levels: number[];
+  /** Cached Box–Muller second value, or null when empty. */
+  spareGaussian: number | null;
+  lastTimestamp: number;
+  sampleIntervalMs: number;
 }
 
 /** Shape of one simulated series. */
@@ -108,7 +125,7 @@ export interface DataGeneratorOptions {
  * so there is no visible discontinuity where history meets the live edge.
  */
 export class DataGenerator {
-  private readonly rng: () => number;
+  private rngState: number;
   private readonly sampleIntervalMs: number;
   /** Current level of each series, indexed by category id. */
   private readonly levels: Float64Array;
@@ -119,7 +136,7 @@ export class DataGenerator {
 
   constructor(options: DataGeneratorOptions = {}) {
     const { seed = 0x5eed, sampleIntervalMs = SAMPLE_INTERVAL_MS } = options;
-    this.rng = mulberry32(seed);
+    this.rngState = seed >>> 0;
     this.sampleIntervalMs = sampleIntervalMs;
     this.levels = new Float64Array(CATEGORIES.length);
     for (let i = 0; i < CATEGORIES.length; i++) {
@@ -128,6 +145,43 @@ export class DataGenerator {
       this.levels[i] = PROFILES[category].base + this.gaussian() * 3;
     }
     this.lastTimestampMs = 0;
+  }
+
+  private rng(): number {
+    const next = mulberry32Next(this.rngState);
+    this.rngState = next.state;
+    return next.value;
+  }
+
+  /** Capture the walk's state so it can be resumed elsewhere. */
+  snapshot(): GeneratorSnapshot {
+    return {
+      rngState: this.rngState,
+      levels: Array.from(this.levels),
+      spareGaussian: Number.isNaN(this.spareGaussian)
+        ? null
+        : this.spareGaussian,
+      lastTimestamp: this.lastTimestampMs,
+      sampleIntervalMs: this.sampleIntervalMs,
+    };
+  }
+
+  /**
+   * Rebuild a generator positioned exactly where `snapshot` was taken, so the
+   * next tick continues the same walk rather than starting a new one.
+   */
+  static restore(snapshot: GeneratorSnapshot): DataGenerator {
+    const generator = new DataGenerator({
+      sampleIntervalMs: snapshot.sampleIntervalMs,
+    });
+    generator.rngState = snapshot.rngState >>> 0;
+    for (let i = 0; i < CATEGORIES.length; i++) {
+      generator.levels[i] = snapshot.levels[i] ?? 0;
+    }
+    generator.spareGaussian =
+      snapshot.spareGaussian === null ? NaN : snapshot.spareGaussian;
+    generator.lastTimestampMs = snapshot.lastTimestamp;
+    return generator;
   }
 
   /** Standard normal via Box–Muller, generating two at a time. */

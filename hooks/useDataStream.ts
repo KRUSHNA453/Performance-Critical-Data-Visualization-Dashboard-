@@ -7,6 +7,11 @@ import {
   categoryId,
 } from "@/lib/dataGenerator";
 import { SeriesRingBuffer } from "@/lib/ringBuffer";
+import {
+  hydrateBuffer,
+  restoreGenerator,
+  type SerializedDataset,
+} from "@/lib/serialization";
 
 /** Default sliding-window size, in total samples across all series. */
 export const DEFAULT_CAPACITY = 10_000;
@@ -30,6 +35,13 @@ export interface UseDataStreamOptions {
   autoStart?: boolean;
   /** Backfill the buffer to capacity before the first tick. */
   backfill?: boolean;
+  /**
+   * Server-generated history. When present the client hydrates from it and
+   * resumes the same walk instead of generating its own, so the data on screen
+   * is the data the server rendered — no flash of different history, and no
+   * duplicated generation work on the client.
+   */
+  initialDataset?: SerializedDataset;
 }
 
 export interface DataStreamStats {
@@ -84,6 +96,7 @@ export function useDataStream(
     seed = 0x5eed,
     autoStart = true,
     backfill = true,
+    initialDataset,
   } = options;
 
   // Lazily constructed once, then stable for the hook's lifetime.
@@ -95,10 +108,12 @@ export function useDataStream(
 
   const generatorRef = useRef<DataGenerator | null>(null);
   if (generatorRef.current === null) {
-    generatorRef.current = new DataGenerator({
-      seed,
-      sampleIntervalMs: intervalMs,
-    });
+    // Resuming the server's walk keeps history and live ticks continuous;
+    // a fresh generator would visibly jump at the join.
+    generatorRef.current =
+      initialDataset === undefined
+        ? new DataGenerator({ seed, sampleIntervalMs: intervalMs })
+        : restoreGenerator(initialDataset);
   }
 
   const listenersRef = useRef(new Set<() => void>());
@@ -122,6 +137,10 @@ export function useDataStream(
 
   /** Seed the buffer with history so the first frame already renders at scale. */
   const fill = useCallback(() => {
+    if (initialDataset !== undefined) {
+      hydrateBuffer(buffer, initialDataset);
+      return;
+    }
     const generator = generatorRef.current!;
     const points = generator.generateInitial(capacity);
     // Backfill can exceed capacity; the ring buffer evicts as it goes, leaving
@@ -130,7 +149,7 @@ export function useDataStream(
       const p = points[i]!;
       buffer.push(p.timestamp, p.value, categoryId(p.category), p.metadata);
     }
-  }, [buffer, capacity]);
+  }, [buffer, capacity, initialDataset]);
 
   useEffect(() => {
     // Ref guard rather than an empty-deps assumption: React StrictMode mounts
@@ -195,14 +214,16 @@ export function useDataStream(
 
   const reset = useCallback(() => {
     buffer.clear();
-    generatorRef.current = new DataGenerator({
-      seed,
-      sampleIntervalMs: intervalMs,
-    });
+    // Reset means "back to the history we started from", so with a server
+    // dataset that is the server's walk, not a fresh client-seeded one.
+    generatorRef.current =
+      initialDataset === undefined
+        ? new DataGenerator({ seed, sampleIntervalMs: intervalMs })
+        : restoreGenerator(initialDataset);
     skippedTicksRef.current = 0;
     if (backfill) fill();
     notify();
-  }, [buffer, seed, intervalMs, backfill, fill, notify]);
+  }, [buffer, seed, intervalMs, backfill, fill, notify, initialDataset]);
 
   const getStats = useCallback(
     (): DataStreamStats => ({
