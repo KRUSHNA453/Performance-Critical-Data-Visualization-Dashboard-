@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, type MutableRefObject } from "react";
+import { memo, useCallback, useMemo, useRef, type MutableRefObject } from "react";
 import { ChartCanvas, type ChartFrame, type DrawResult } from "./ChartCanvas";
 import { ChartLegend } from "./ChartLegend";
 import {
@@ -16,8 +16,6 @@ import {
   linearTicks,
   niceStep,
   timeTicks,
-} from "@/lib/canvasUtils";
-import {
   createVertexBuffer,
   projectBuckets,
   vertexCapacityFor,
@@ -75,7 +73,7 @@ export interface ScatterPlotProps {
  * pairs, and the fourth slot fails that bar against the second. See
  * `SCATTER_SERIES_LIMIT`.
  */
-export function ScatterPlot({
+function ScatterPlotImpl({
   buffer,
   visibleCategories = ALL_CATEGORIES,
   viewportRef,
@@ -292,3 +290,6 @@ export function ScatterPlot({
     </ChartCanvas>
   );
 }
+
+/** Skips the dashboard's ~2Hz metrics re-renders; see LineChart. */
+export const ScatterPlot = memo(ScatterPlotImpl);

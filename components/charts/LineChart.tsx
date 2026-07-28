@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, type MutableRefObject } from "react";
+import { memo, useCallback, useMemo, useRef, type MutableRefObject } from "react";
 import { ChartCanvas, type ChartFrame, type DrawResult } from "./ChartCanvas";
 import { ChartLegend } from "./ChartLegend";
 import { AXIS_FONT } from "@/lib/theme";
@@ -66,7 +66,7 @@ export interface LineChartProps {
  * re-render React ten times a second. This component supplies only a `draw`
  * callback; the loop, sizing, dirty check and metrics are shared.
  */
-export function LineChart({
+function LineChartImpl({
   buffer,
   visibleCategories = ALL_CATEGORIES,
   viewportRef,
@@ -247,6 +247,15 @@ export function LineChart({
     </ChartCanvas>
   );
 }
+
+/**
+ * The dashboard re-renders about twice a second to publish metrics, and every
+ * one of those renders would otherwise walk this component and rebuild its
+ * callbacks for no reason — the canvas is driven by a rAF loop that never reads
+ * React's output. All props are stable by construction (refs, memoised sets,
+ * useCallback handlers), so a shallow compare cuts those renders entirely.
+ */
+export const LineChart = memo(LineChartImpl);
 
 /**
  * Series labels at the live edge, drawn in the right-hand gutter.

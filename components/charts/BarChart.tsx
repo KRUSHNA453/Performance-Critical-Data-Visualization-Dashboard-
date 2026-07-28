@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, type MutableRefObject } from "react";
+import { memo, useCallback, useMemo, useRef, type MutableRefObject } from "react";
 import { ChartCanvas, type ChartFrame, type DrawResult } from "./ChartCanvas";
 import { ChartLegend } from "./ChartLegend";
 import {
@@ -91,7 +91,7 @@ export interface BarChartProps {
  * Shares the render loop, sizing and metrics with every other chart via
  * `ChartCanvas`; only the draw callback differs.
  */
-export function BarChart({
+function BarChartImpl({
   buffer,
   visibleCategories = ALL_CATEGORIES,
   viewportRef,
@@ -281,3 +281,6 @@ export function BarChart({
     </ChartCanvas>
   );
 }
+
+/** Skips the dashboard's ~2Hz metrics re-renders; see LineChart. */
+export const BarChart = memo(BarChartImpl);

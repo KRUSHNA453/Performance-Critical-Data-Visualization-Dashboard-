@@ -1,6 +1,13 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useVirtualization } from "@/hooks/useVirtualization";
 import type { SeriesRingBuffer } from "@/lib/ringBuffer";
 import { CATEGORY_LABELS } from "@/lib/theme";
@@ -76,7 +83,7 @@ function formatClock(ms: number): string {
  *   category toggle costs one O(n) rebuild at 4Hz instead of allocating a new
  *   filtered array on every frame.
  */
-export function DataTable({
+function DataTableImpl({
   buffer,
   visibleCategories = ALL_CATEGORIES,
   height = 340,
@@ -361,3 +368,7 @@ export function DataTable({
     </div>
   );
 }
+
+/** Rebuilding a 10,000-entry index map is the costliest thing a filter change
+ *  triggers, so this subtree is kept out of unrelated parent renders. */
+export const DataTable = memo(DataTableImpl);

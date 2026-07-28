@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import {
+  useCallback,
+  useDeferredValue,
+  useMemo,
+  useRef,
+  useState,
+  useTransition,
+} from "react";
 import { BarChart } from "@/components/charts/BarChart";
 import { LineChart } from "@/components/charts/LineChart";
 import { ScatterPlot } from "@/components/charts/ScatterPlot";
@@ -9,6 +16,7 @@ import { FilterPanel } from "@/components/controls/FilterPanel";
 import { TimeRangeSelector } from "@/components/controls/TimeRangeSelector";
 import { DataTable } from "@/components/ui/DataTable";
 import { MetricsPanel } from "@/components/ui/MetricsPanel";
+import { PerformanceMonitor } from "@/components/ui/PerformanceMonitor";
 import { useDataStream } from "@/hooks/useDataStream";
 import {
   CATEGORIES,
@@ -60,6 +68,42 @@ export default function DashboardClient({
   const [metrics, setMetrics] = useState<PerformanceMetrics | null>(null);
 
   /**
+   * Swapping chart type unmounts a canvas and mounts another, tearing down one
+   * rAF loop and starting another. It is the single heaviest state change here,
+   * and the one worth marking interruptible.
+   *
+   * Two pieces of state rather than one, deliberately. `selectedTab` is urgent
+   * and drives the highlight, so the button responds to the click on the next
+   * frame. `chartType` is transitioned and drives the mount, so the expensive
+   * swap happens at lower priority and can be interrupted by another click.
+   * Driving both from one state would defer the highlight too, and the tab
+   * would appear dead for as long as the swap took — the exact unresponsiveness
+   * the transition was meant to prevent.
+   */
+  const [isSwitchingChart, startChartTransition] = useTransition();
+  const [selectedTab, setSelectedTab] = useState<ChartType>("line");
+  const selectChartType = useCallback(
+    (next: ChartType) => {
+      setSelectedTab(next);
+      startChartTransition(() => setChartType(next));
+    },
+    [startChartTransition],
+  );
+
+  /**
+   * The charts respond to a filter change almost for free — hidden series are
+   * skipped by a mask in the projection loop. The table is the expensive
+   * consumer: it rebuilds a 10,000-entry index map and reconciles rows.
+   *
+   * So the two are deliberately split rather than both being deferred. Charts
+   * and the checkboxes themselves read the urgent value and update on the next
+   * frame; the table reads the deferred one and is allowed to lag, so rapid
+   * toggling never queues up index rebuilds behind the input.
+   */
+  const deferredVisible = useDeferredValue(visible);
+  const tableIsStale = deferredVisible !== visible;
+
+  /**
    * The viewport lives in a ref because the render loop reads it every frame
    * and gestures mutate it directly. `viewportUi` is a throttled mirror, used
    * only by the DOM controls that display the range.
@@ -93,17 +137,33 @@ export default function DashboardClient({
   );
   const live = timeWindow?.live ?? true;
 
-  const chartProps = {
-    buffer,
-    visibleCategories: visible,
-    viewportRef,
-    onViewportChange: handleViewportChange,
-    live,
-    aggregation,
-    forceRedraw: stress,
-    onMetrics: handleMetrics,
-    height: 360,
-  };
+  /**
+   * Memoised so the charts' `React.memo` shallow compare actually holds. These
+   * values change only on real user input; without this they would be rebuilt
+   * on every metrics tick and defeat the memo.
+   */
+  const chartProps = useMemo(
+    () => ({
+      buffer,
+      visibleCategories: visible,
+      viewportRef,
+      onViewportChange: handleViewportChange,
+      live,
+      aggregation,
+      forceRedraw: stress,
+      onMetrics: handleMetrics,
+      height: 360,
+    }),
+    [
+      buffer,
+      visible,
+      handleViewportChange,
+      live,
+      aggregation,
+      stress,
+      handleMetrics,
+    ],
+  );
 
   return (
     <main
@@ -151,14 +211,15 @@ export default function DashboardClient({
         style={{ display: "flex", gap: 8 }}
       >
         {CHART_TYPES.map((type) => {
-          const selected = chartType === type.id;
+          // Highlight follows the urgent state, not the transitioned one.
+          const selected = selectedTab === type.id;
           return (
             <button
               key={type.id}
               type="button"
               role="tab"
               aria-selected={selected}
-              onClick={() => setChartType(type.id)}
+              onClick={() => selectChartType(type.id)}
               style={{
                 ...buttonStyle,
                 borderColor: selected ? "var(--series-cpu)" : "var(--border)",
@@ -184,7 +245,16 @@ export default function DashboardClient({
         </button>
       </div>
 
-      <section className="panel">
+      <section
+        className="panel"
+        // Dim rather than blank during the swap: replacing a rendered chart
+        // with a spinner loses more information than the wait costs.
+        style={{
+          opacity: isSwitchingChart ? 0.6 : 1,
+          transition: "opacity 120ms ease",
+        }}
+        aria-busy={isSwitchingChart}
+      >
         {chartType === "line" && <LineChart {...chartProps} />}
         {chartType === "bar" && <BarChart {...chartProps} />}
         {chartType === "scatter" && <ScatterPlot {...chartProps} />}
@@ -199,8 +269,34 @@ export default function DashboardClient({
       </section>
 
       <section className="panel">
-        <h2 style={{ fontSize: 14, margin: "0 0 10px" }}>Raw data points</h2>
-        <DataTable buffer={buffer} visibleCategories={visible} height={340} />
+        <h2
+          style={{
+            fontSize: 14,
+            margin: "0 0 10px",
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          Raw data points
+          {tableIsStale && (
+            <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+              updating…
+            </span>
+          )}
+        </h2>
+        <div
+          style={{
+            opacity: tableIsStale ? 0.6 : 1,
+            transition: "opacity 120ms ease",
+          }}
+        >
+          <DataTable
+            buffer={buffer}
+            visibleCategories={deferredVisible}
+            height={340}
+          />
+        </div>
       </section>
 
       <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>
@@ -208,6 +304,8 @@ export default function DashboardClient({
         changed — use it when profiling, so the numbers reflect sustained
         worst-case render load rather than the idle path.
       </p>
+
+      <PerformanceMonitor drawMetrics={metrics} />
     </main>
   );
 }
